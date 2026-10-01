@@ -1,0 +1,114 @@
+name: Build images from upstream release
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Upstream tag to build (empty = latest release)"
+        required: false
+      force:
+        description: "Rebuild even if the tag already exists in GHCR"
+        type: boolean
+        default: false
+  push:
+    branches: [main]
+    paths: ["bridge/**", "mcp/**", ".github/workflows/build.yml"]
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  UPSTREAM: verygoodplugins/whatsapp-mcp
+  REGISTRY: ghcr.io
+  OWNER: jaytalge
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve upstream tag
+        id: tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          if [ -n "$INPUT_TAG" ]; then
+            TAG="$INPUT_TAG"
+          else
+            TAG=$(gh api "repos/$UPSTREAM/releases/latest" --jq .tag_name)
+          fi
+          case "$TAG" in v[0-9]*) ;; *) echo "Unexpected tag: $TAG"; exit 1 ;; esac
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Upstream tag: $TAG"
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Skip if already built
+        id: check
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+          FORCE: ${{ inputs.force || github.event_name == 'push' }}
+        run: |
+          if [ "$FORCE" != "true" ] \
+             && docker manifest inspect "$REGISTRY/$OWNER/whatsapp-bridge:$TAG" >/dev/null 2>&1 \
+             && docker manifest inspect "$REGISTRY/$OWNER/whatsapp-mcp:$TAG" >/dev/null 2>&1; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"; echo "$TAG already built"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.check.outputs.skip == 'false'
+        with:
+          path: packaging
+
+      - uses: actions/checkout@v4
+        if: steps.check.outputs.skip == 'false'
+        with:
+          repository: ${{ env.UPSTREAM }}
+          ref: ${{ steps.tag.outputs.tag }}
+          path: upstream
+
+      - uses: docker/setup-buildx-action@v3
+        if: steps.check.outputs.skip == 'false'
+
+      - name: Build and push bridge
+        if: steps.check.outputs.skip == 'false'
+        uses: docker/build-push-action@v6
+        with:
+          context: upstream/whatsapp-bridge
+          file: packaging/bridge/Dockerfile
+          platforms: linux/amd64
+          push: true
+          provenance: false
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.OWNER }}/whatsapp-bridge:${{ steps.tag.outputs.tag }}
+            ${{ env.REGISTRY }}/${{ env.OWNER }}/whatsapp-bridge:latest
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ steps.tag.outputs.tag }}
+            org.opencontainers.image.revision=${{ steps.tag.outputs.tag }}@${{ env.UPSTREAM }}
+
+      - name: Build and push MCP server
+        if: steps.check.outputs.skip == 'false'
+        uses: docker/build-push-action@v6
+        with:
+          context: upstream/whatsapp-mcp-server
+          file: packaging/mcp/Dockerfile
+          platforms: linux/amd64
+          push: true
+          provenance: false
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.OWNER }}/whatsapp-mcp:${{ steps.tag.outputs.tag }}
+            ${{ env.REGISTRY }}/${{ env.OWNER }}/whatsapp-mcp:latest
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ steps.tag.outputs.tag }}
+            org.opencontainers.image.revision=${{ steps.tag.outputs.tag }}@${{ env.UPSTREAM }}
