@@ -76,6 +76,15 @@ jobs:
           ref: ${{ steps.tag.outputs.tag }}
           path: upstream
 
+      - name: Apply local bridge patches
+        if: steps.check.outputs.skip == 'false'
+        run: |
+          for p in packaging/bridge/patches/*.patch; do
+            echo "Applying $p"
+            git -C upstream apply --verbose "$GITHUB_WORKSPACE/$p"
+          done
+          grep -q 'REST_BIND_ADDR' upstream/whatsapp-bridge/main.go
+
       - uses: docker/setup-buildx-action@v3
         if: steps.check.outputs.skip == 'false'
 
